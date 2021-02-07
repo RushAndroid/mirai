@@ -11,7 +11,18 @@ package net.mamoe.mirai.internal.network
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import net.mamoe.mirai.internal.QQAndroidBot
 import net.mamoe.mirai.internal.contact.info.FriendInfoImpl
+import net.mamoe.mirai.internal.contact.info.MemberInfoImpl
+import net.mamoe.mirai.internal.network.protocol.data.jce.StTroopNum
+import net.mamoe.mirai.internal.utils.ScheduledJob
+import net.mamoe.mirai.utils.createFileIfNotExists
+import net.mamoe.mirai.utils.info
+import net.mamoe.mirai.utils.runBIO
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import kotlin.time.milliseconds
 
 internal val JsonForCache = Json {
     encodeDefaults = true
@@ -28,3 +39,88 @@ internal data class FriendListCache(
     var timeStamp: Long = 0,
     var list: List<FriendInfoImpl> = emptyList(),
 )
+
+@Serializable
+internal data class GroupMemberListCache(
+    var troopMemberNumSeq: Long,
+    var list: List<MemberInfoImpl> = emptyList(),
+)
+
+internal fun GroupMemberListCache.isValid(stTroopNum: StTroopNum): Boolean {
+    return this.list.size == stTroopNum.dwMemberNum?.toInt() && this.troopMemberNumSeq == stTroopNum.dwMemberNumSeq
+}
+
+internal class GroupMemberListCaches(
+    private val bot: QQAndroidBot,
+) {
+    init {
+        @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+        bot.eventChannel.parentScope(bot)
+            .subscribeAlways<net.mamoe.mirai.event.events.BaseGroupMemberInfoChangeEvent> {
+                groupListSaver.notice()
+            }
+
+    }
+
+    private val changedGroups: MutableCollection<Long> = ConcurrentLinkedQueue()
+    private val groupListSaver by lazy {
+        ScheduledJob(bot.coroutineContext, bot.configuration.groupMemberListCache!!.saveIntervalMillis.milliseconds) {
+            runBIO { saveGroupCaches() }
+        }
+    }
+
+    fun reportChanged(groupCode: Long) {
+        changedGroups.add(groupCode)
+        groupListSaver.notice()
+    }
+
+    private fun takeCurrentChangedGroups(): Map<Long, GroupMemberListCache> {
+        val ret = HashMap<Long, GroupMemberListCache>()
+        changedGroups.removeIf {
+            ret[it] = get(it)
+            true
+        }
+        return ret
+    }
+
+    private val cacheDir by lazy {
+        bot.configuration.groupMemberListCache!!.cacheDir.let { bot.configuration.workingDir.resolve(it) }
+    }
+
+    private fun resolveCacheFile(groupCode: Long): File {
+        cacheDir.mkdirs()
+        return cacheDir.resolve("$groupCode.json")
+    }
+
+    private fun saveGroupCaches() {
+        val currentChanged = takeCurrentChangedGroups()
+        if (currentChanged.isNotEmpty()) {
+            for ((id, cache) in currentChanged) {
+                val file = resolveCacheFile(id)
+                file.createFileIfNotExists()
+                file.writeText(JsonForCache.encodeToString(GroupMemberListCache.serializer(), cache))
+            }
+            bot.network.logger.info { "Saved ${currentChanged.size} groups to local cache." }
+        }
+    }
+
+    val map: MutableMap<Long, GroupMemberListCache> = ConcurrentHashMap()
+
+    fun retainAll(list: Collection<Long>) {
+        this.map.keys.retainAll(list)
+    }
+
+    operator fun get(id: Long): GroupMemberListCache {
+        return map.getOrPut(id) {
+            val file = resolveCacheFile(id)
+            if (file.exists() && file.isFile) {
+                val text = file.readText()
+                if (text.isNotBlank()) {
+                    return JsonForCache.decodeFromString(GroupMemberListCache.serializer(), text)
+                }
+            }
+
+            GroupMemberListCache(0, emptyList())
+        }
+    }
+}

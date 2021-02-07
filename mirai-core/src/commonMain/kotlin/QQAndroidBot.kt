@@ -18,6 +18,7 @@ import net.mamoe.mirai.LowLevelApi
 import net.mamoe.mirai.Mirai
 import net.mamoe.mirai.contact.*
 import net.mamoe.mirai.data.*
+import net.mamoe.mirai.event.events.MemberPermissionChangeEvent
 import net.mamoe.mirai.internal.contact.OtherClientImpl
 import net.mamoe.mirai.internal.contact.checkIsGroupImpl
 import net.mamoe.mirai.internal.contact.info.FriendInfoImpl
@@ -78,16 +79,25 @@ internal class QQAndroidBot constructor(
     override val friends: ContactList<Friend> = ContactList()
 
     val friendListCache: FriendListCache? by lazy {
-        configuration.friendListCache?.cacheFile?.run {
-            val ret = loadAs(FriendListCache.serializer(), JsonForCache) ?: FriendListCache()
+        configuration.friendListCache?.cacheFile?.let { cacheFile ->
+            val ret = configuration.workingDir.resolve(cacheFile).loadAs(FriendListCache.serializer(), JsonForCache) ?: FriendListCache()
 
             @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
             bot.eventChannel.parentScope(this@QQAndroidBot)
                 .subscribeAlways<net.mamoe.mirai.event.events.FriendInfoChangeEvent> {
                     friendListSaver?.notice()
                 }
+        val x: MemberPermissionChangeEvent by lazy { TODO() }
+
+            x.groupId
 
             ret
+        }
+    }
+
+    val groupMemberListCaches: GroupMemberListCaches? by lazy {
+        configuration.groupMemberListCache?.cacheDir?.let { cacheDir ->
+            GroupMemberListCaches(this)
         }
     }
 
@@ -99,11 +109,10 @@ internal class QQAndroidBot constructor(
             }
         }
     }
-
     fun saveFriendCache() {
         val friendListCache = friendListCache
         if (friendListCache != null) {
-            configuration.friendListCache?.cacheFile?.run {
+            configuration.friendListCache?.cacheFile?.let { configuration.workingDir.resolve(it) }?.run {
                 createFileIfNotExists()
                 writeText(JsonForCache.encodeToString(FriendListCache.serializer(), friendListCache))
                 bot.network.logger.info { "Saved ${friendListCache.list.size} friends to local cache." }
